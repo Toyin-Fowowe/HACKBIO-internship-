@@ -1,0 +1,141 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import ttest_ind
+import pandas as pd
+
+# URL to the TSV file
+url = "https://raw.githubusercontent.com/HackBio-Internship/2025_project_collection/refs/heads/main/Python/Dataset/mcgc.tsv"
+
+# Read the TSV file directly from the URL
+data = pd.read_csv(url, sep='\t')
+
+# Display the first few rows to inspect the data
+print(data.head())
+print("Dataset columns:", data.columns.tolist())
+# Define the replicate labels as given in the note (adjusting last row as needed)
+replicate_labels = ["Strain1_Rep1", "Strain1_Rep2", "Strain2_Rep1",
+                    "Strain2_Rep2", "Strain3_Rep1", "Strain3_Rep2"]
+
+
+# We have three experimental groups (A, B, and C). For each group, every two columns are:
+# First column: WT, Second column: MUT.
+meta = {}
+for letter in ['A', 'B', 'C']:
+    for i in range(6):  # i=0,...,5 for the six rows
+        wt_col = f"{letter}{2*i + 1}"   # e.g., A1, A3, ..., A11
+        mut_col = f"{letter}{2*i + 2}"    # e.g., A2, A4, ..., A12
+        # Assign metadata for the WT column
+        meta[wt_col] = {
+            'Experiment': letter,
+            'Replicate_Label': replicate_labels[i],
+            'Condition': 'WT'
+        }
+        # Assign metadata for the MUT column
+        meta[mut_col] = {
+            'Experiment': letter,
+            'Replicate_Label': replicate_labels[i],
+            'Condition': 'MUT'
+        }
+# Melt the data so that each row corresponds to a single measurement
+
+df_long = data.melt(id_vars=['time'], var_name='Column', value_name='OD600')
+
+# Map metadata from our dictionary into new columns
+df_long['Experiment'] = df_long['Column'].map(lambda x: meta[x]['Experiment'])
+df_long['Replicate_Label'] = df_long['Column'].map(lambda x: meta[x]['Replicate_Label'])
+df_long['Condition'] = df_long['Column'].map(lambda x: meta[x]['Condition'])
+
+# Extract the strain name from the Replicate_Label (e.g., "Strain1_Rep1" -> "Strain1")
+df_long['Strain'] = df_long['Replicate_Label'].apply(lambda x: x.split('_')[0])
+
+print("Long-format data sample:")
+print(df_long.head())
+# For each strain (e.g., Strain1, Strain2, Strain3), average the OD600 values over replicates for each condition (WT and MUT) and overlay the curves.
+unique_strains = df_long['Strain'].unique()
+for strain in unique_strains:
+    plt.figure(figsize=(8, 6))
+    df_strain = df_long[df_long['Strain'] == strain]
+
+    for condition in ['WT', 'MUT']:
+        # Group by time and take the average OD600 for the condition
+        avg_curve = df_strain[df_strain['Condition'] == condition].groupby('time')['OD600'].mean().reset_index()
+        plt.plot(avg_curve['time'], avg_curve['OD600'], marker='o', label=condition)
+
+    plt.title(f'Average Growth Curves for {strain}\n(WT vs MUT)')
+    plt.xlabel('Time')
+    plt.ylabel('OD600')
+    plt.legend(title='Condition')
+    plt.show()
+
+def time_to_capacity(time, od, threshold=0.95):
+    """
+    Estimate the time at which the OD600 reaches a specified fraction (default 95%)
+    of its maximum value (i.e. the carrying capacity).
+    """
+    time = np.array(time)
+    od = np.array(od)
+    max_od = np.max(od)
+    capacity_val = threshold * max_od
+
+    # Return the first time point when OD600 is equal or exceeds the threshold.
+    for t, od_val in zip(time, od):
+        if od_val >= capacity_val:
+            return t
+    return np.nan
+
+# For each unique combination of Experiment, Replicate_Label, and Condition,
+# compute the time to reach 95% of the maximum OD600.
+ttc_results = []
+grouped = df_long.groupby(['Experiment', 'Replicate_Label', 'Condition'])
+
+for name, group in grouped:
+    # Sort by time to ensure proper sequential analysis
+    group_sorted = group.sort_values(by='time')
+    ttc = time_to_capacity(group_sorted['time'], group_sorted['OD600'])
+    exp, rep_label, cond = name
+    # Also extract the strain from the replicate label (e.g., "Strain1")
+    strain = rep_label.split('_')[0]
+    ttc_results.append({
+        'Experiment': exp,
+        'Replicate_Label': rep_label,
+        'Strain': strain,
+        'Condition': cond,
+        'Time_to_Capacity': ttc
+    })
+
+ttc_df = pd.DataFrame(ttc_results)
+print("Time-to-capacity results (sample):")
+print(ttc_df.head())
+
+# Scatter plot: each point represents a replicate's time-to-capacity, colored by strain.
+plt.figure(figsize=(10, 6))
+sns.scatterplot(data=ttc_df, x='Condition', y='Time_to_Capacity', hue='Strain', style='Strain', s=100)
+plt.title('Scatter Plot: Time to Reach Carrying Capacity (WT vs MUT)')
+plt.xlabel('Condition')
+plt.ylabel('Time to Carrying Capacity')
+plt.show()
+# Comment: This scatter plot shows the variability among replicates across conditions and strains.
+
+# Box plot: shows the overall distribution of time-to-capacity for each condition.
+plt.figure(figsize=(8, 6))
+sns.boxplot(data=ttc_df, x='Condition', y='Time_to_Capacity')
+plt.title('Box Plot: Time to Reach Carrying Capacity (WT vs MUT)')
+plt.xlabel('Condition')
+plt.ylabel('Time to Carrying Capacity')
+plt.show()
+
+
+# Separate the times for WT and MUT (across all strains and replicates)
+ttc_wt = ttc_df[ttc_df['Condition'] == 'WT']['Time_to_Capacity'].dropna()
+ttc_mut = ttc_df[ttc_df['Condition'] == 'MUT']['Time_to_Capacity'].dropna()
+
+t_stat, p_value = ttest_ind(ttc_wt, ttc_mut, equal_var=False)
+
+print("t-test Results:")
+print(f"t-statistic: {t_stat:.3f}, p-value: {p_value:.3f}")
+if p_value < 0.05:
+    print("There is a statistically significant difference in the time to reach carrying capacity between WT and MUT conditions.")
+else:
+    print("There is no statistically significant difference between the conditions.")
